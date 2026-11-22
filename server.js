@@ -21,6 +21,22 @@ const MAX_PLAYLIST_BYTES = 1024 * 1024;
 const MAX_SEGMENT_BYTES = Number(process.env.PROXY_MAX_SEGMENT_BYTES || 16 * 1024 * 1024);
 const MAX_STREAMS_PER_EVENT = 6;
 
+// Optional external proxy: when set, streams are served through EasyProxy instead of the built-in /hls + /seg proxy.
+const EASYPROXY_URL = (process.env.EASYPROXY_URL || "").trim().replace(/\/+$/, "");
+const EASYPROXY_PASSWORD = (process.env.EASYPROXY_PASSWORD || "").trim();
+if (EASYPROXY_URL && !/^https?:\/\/[^/\s]+$/i.test(EASYPROXY_URL)) {
+  console.error("EASYPROXY_URL must be an origin without path, e.g. https://easyproxy.example.com");
+  process.exit(1);
+}
+
+// EasyProxy format: <base>/proxy/manifest.m3u8?url=<target>&h_<Header>=<value>[&api_password=<pw>]
+function easyProxyUrl(target, headers) {
+  const params = new URLSearchParams({ url: target });
+  for (const [name, value] of Object.entries(headers || {})) if (value) params.set(`h_${name}`, value);
+  if (EASYPROXY_PASSWORD) params.set("api_password", EASYPROXY_PASSWORD);
+  return `${EASYPROXY_URL}/proxy/manifest.m3u8?${params}`;
+}
+
 if (ACCESS_KEY && !/^[A-Za-z0-9_-]{16,128}$/.test(ACCESS_KEY)) {
   console.error("ACCESS_KEY must be 16-128 chars of [A-Za-z0-9_-].");
   process.exit(1);
@@ -289,7 +305,9 @@ router.get("/stream/:type/:id.json", apiLimit, async (req, res) => {
         return {
           name: clip(candidate.name || stream.name || "FCTV77", 80),
           title: eventTitle(item),
-          url: `${base}/hls/${packProxy(stream.url, stream.headers)}/index.m3u8`,
+          url: EASYPROXY_URL
+            ? easyProxyUrl(stream.url, stream.headers)
+            : `${base}/hls/${packProxy(stream.url, stream.headers)}/index.m3u8`,
           behaviorHints: { notWebReady: true }
         };
       } catch (error) {
@@ -305,6 +323,9 @@ router.get("/stream/:type/:id.json", apiLimit, async (req, res) => {
 });
 
 // ---------- HLS proxy (signed, SSRF-guarded) ----------
+// Disabled when EasyProxy is used, to keep the attack surface minimal.
+router.use(["/hls", "/seg"], (_req, res, next) => EASYPROXY_URL ? res.status(404).end() : next());
+
 function proxyError(res, error, label) {
   if (error instanceof Forbidden) return res.status(403).type("text/plain").send("forbidden");
   console.error(`${label}:`, error.message);
