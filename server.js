@@ -1,11 +1,12 @@
 import "dotenv/config";
+import { readFileSync } from "node:fs";
 import express from "express";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { encodeId, decodeId } from "./src/id.js";
 import { streamDetail } from "./src/stream.js";
-import { liveMatches, inspectLiveCatalog, resolveMatchStreams, cachedMatch } from "./src/live.js";
+import { liveMatches, inspectLiveCatalog, resolveMatchStreams, cachedMatch, LANGUAGES } from "./src/live.js";
 import { getDomainStatus, startDomainRefresh } from "./src/domains.js";
 
 const VERSION = "0.9.12";
@@ -24,17 +25,19 @@ const MAX_STREAMS_PER_EVENT = 6;
 // Optional external proxy: when set, streams are served through EasyProxy instead of the built-in /hls + /seg proxy.
 const EASYPROXY_URL = (process.env.EASYPROXY_URL || "").trim().replace(/\/+$/, "");
 const EASYPROXY_PASSWORD = (process.env.EASYPROXY_PASSWORD || "").trim();
+// When true, streams are served only through an EasyProxy (server-wide EASYPROXY_URL or the user's own); the built-in proxy is off.
+const REQUIRE_EASYPROXY = /^(1|true|yes|on)$/i.test((process.env.EASYPROXY_REQUIRED || "").trim());
 if (EASYPROXY_URL && !/^https?:\/\/[^/\s]+$/i.test(EASYPROXY_URL)) {
   console.error("EASYPROXY_URL must be an origin without path, e.g. https://easyproxy.example.com");
   process.exit(1);
 }
 
 // EasyProxy format: <base>/proxy/manifest.m3u8?url=<target>&h_<Header>=<value>[&api_password=<pw>]
-function easyProxyUrl(target, headers) {
+function easyProxyUrl(target, headers, cfg = { proxy: EASYPROXY_URL, password: EASYPROXY_PASSWORD }) {
   const params = new URLSearchParams({ url: target });
   for (const [name, value] of Object.entries(headers || {})) if (value) params.set(`h_${name}`, value);
-  if (EASYPROXY_PASSWORD) params.set("api_password", EASYPROXY_PASSWORD);
-  return `${EASYPROXY_URL}/proxy/manifest.m3u8?${params}`;
+  if (cfg.password) params.set("api_password", cfg.password);
+  return `${cfg.proxy}/proxy/manifest.m3u8?${params}`;
 }
 
 if (ACCESS_KEY && !/^[A-Za-z0-9_-]{16,128}$/.test(ACCESS_KEY)) {
@@ -60,7 +63,29 @@ const publicBase = req => `${PUBLIC_BASE_URL || `${req.protocol}://${req.get("ho
 
 // ---------- helpers ----------
 const clip = (value, max = 200) => String(value ?? "").slice(0, max);
-const slimMatch = ({ logos, leagueLogo, streams, ...rest }) => rest;
+const slimMatch = ({ logos, leagueLogo, streams, leagueId, country, ...rest }) => rest;
+
+const leagueLabel = match => {
+  const league = match.league || "Altro";
+  return match.country && match.country !== league ? `${league} · ${match.country}` : league;
+};
+
+// Per-user config lives in the manifest URL: /c/<base64url JSON {l: lang code, p: proxy origin, w: proxy password}>/manifest.json
+const DEFAULT_CFG = { lang: 8, proxy: "", password: "" };
+function parseCfg(raw) {
+  if (!raw || String(raw).length > 1500) return DEFAULT_CFG;
+  try {
+    const parsed = JSON.parse(Buffer.from(String(raw), "base64url").toString("utf8"));
+    const proxy = String(parsed.p || "").trim().replace(/\/+$/, "");
+    return {
+      lang: Object.hasOwn(LANGUAGES, parsed.l) ? LANGUAGES[parsed.l] : DEFAULT_CFG.lang,
+      proxy: /^https?:\/\/[^/\s]+$/i.test(proxy) ? proxy : "",
+      password: clip(parsed.w, 128)
+    };
+  } catch { return DEFAULT_CFG; }
+}
+
+const LANDING = readFileSync(new URL("./public/index.html", import.meta.url), "utf8");
 
 function hmac(data) {
   return createHmac("sha256", HLS_SECRET).update(data).digest("base64url");
@@ -233,21 +258,42 @@ const router = express.Router();
 const apiLimit = rateLimit({ max: Number(process.env.RATE_LIMIT_API_MAX || 120) });
 const proxyLimit = rateLimit({ max: Number(process.env.RATE_LIMIT_PROXY_MAX || 900) });
 
-router.get("/manifest.json", apiLimit, (_req, res) => res.json({
-  id: "community.fctv77.streams",
-  version: VERSION,
-  name: "FCTV77 Streams",
-  description: "FCTV77 live catalog discovered directly from the app API, with stream resolver.",
-  resources: ["catalog", "meta", "stream"],
-  types: ["tv"],
-  catalogs: [{ type: "tv", id: "fctv77_live", name: "FCTV77 Live" }]
-}));
+router.get("/api/public-config", apiLimit, (_req, res) => res.json({ proxyRequired: REQUIRE_EASYPROXY, serverProxy: Boolean(EASYPROXY_URL) }));
 
-router.get("/catalog/tv/fctv77_live.json", apiLimit, async (_req, res) => {
+router.get(["/", "/configure"], (_req, res) => {
+  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'");
+  res.type("html").send(LANDING);
+});
+
+router.get("/manifest.json", apiLimit, async (req, res) => {
+  let genres = [];
   try {
-    const matches = await liveMatches();
+    const matches = await liveMatches({ lang: req.cfg.lang });
+    genres = [...new Set(matches.map(leagueLabel))].sort((a, b) => a.localeCompare(b));
+  } catch (error) {
+    console.error("Manifest catalog error:", error.message);
+  }
+  res.json({
+    id: "community.fctv.live",
+    version: VERSION,
+    name: "FCTV",
+    description: "Live sport events grouped by league.",
+    resources: ["catalog", "meta", "stream"],
+    types: ["tv"],
+    idPrefixes: ["fctv77:"],
+    catalogs: [{ type: "tv", id: "fctv_live", name: "FCTV", extra: [{ name: "genre", options: genres, isRequired: false }] }],
+    behaviorHints: { configurable: true, configurationRequired: false }
+  });
+});
+
+router.get(["/catalog/tv/fctv_live.json", "/catalog/tv/fctv_live/:extra.json"], apiLimit, async (req, res) => {
+  try {
+    const genre = String(req.params.extra || "").match(/^genre=([\s\S]*)$/)?.[1] || "";
+    const all = await liveMatches({ lang: req.cfg.lang });
+    const matches = genre ? all.filter(match => leagueLabel(match) === genre) : all;
     res.json({ metas: matches.map(match => ({
       id: encodeId(slimMatch(match)),
+      genres: [leagueLabel(match)],
       type: "tv",
       poster: match.logos?.[0] || match.leagueLogo || undefined,
       background: match.leagueLogo || match.logos?.[1] || undefined,
@@ -289,6 +335,10 @@ router.get("/stream/:type/:id.json", apiLimit, async (req, res) => {
   try {
     if (req.params.type !== "tv") return res.json({ streams: [] });
     const item = parseItem(req.params.id);
+    if (REQUIRE_EASYPROXY && !(req.cfg.proxy || EASYPROXY_URL)) {
+      console.warn("Stream refused: EASYPROXY_REQUIRED is on and this manifest has no EasyProxy configured.");
+      return res.json({ streams: [] });
+    }
     // Stream ids are always resolved server-side: nothing the client puts in the id reaches the upstream API.
     const candidates = (await resolveMatchStreams(item.matchId, item.sportType)).slice(0, MAX_STREAMS_PER_EVENT);
     const base = publicBase(req);
@@ -305,8 +355,8 @@ router.get("/stream/:type/:id.json", apiLimit, async (req, res) => {
         return {
           name: clip(candidate.name || stream.name || "FCTV77", 80),
           title: eventTitle(item),
-          url: EASYPROXY_URL
-            ? easyProxyUrl(stream.url, stream.headers)
+          url: (req.cfg.proxy || EASYPROXY_URL)
+            ? easyProxyUrl(stream.url, stream.headers, req.cfg.proxy ? req.cfg : undefined)
             : `${base}/hls/${packProxy(stream.url, stream.headers)}/index.m3u8`,
           behaviorHints: { notWebReady: true }
         };
@@ -324,7 +374,7 @@ router.get("/stream/:type/:id.json", apiLimit, async (req, res) => {
 
 // ---------- HLS proxy (signed, SSRF-guarded) ----------
 // Disabled when EasyProxy is used, to keep the attack surface minimal.
-router.use(["/hls", "/seg"], (_req, res, next) => EASYPROXY_URL ? res.status(404).end() : next());
+router.use(["/hls", "/seg"], (_req, res, next) => (EASYPROXY_URL || REQUIRE_EASYPROXY) ? res.status(404).end() : next());
 
 function proxyError(res, error, label) {
   if (error instanceof Forbidden) return res.status(403).type("text/plain").send("forbidden");
@@ -396,7 +446,8 @@ router.get("/debug/catalog", adminLimit, requireAdmin, async (_req, res) => {
 
 router.get("/debug/health", adminLimit, requireAdmin, (_req, res) => res.json({ ok: true, version: VERSION, domains: getDomainStatus() }));
 
-app.use(basePath || "/", router);
+app.use(`${basePath}/c/:cfg`, (req, _res, next) => { req.cfg = parseCfg(req.params.cfg); next(); }, router);
+app.use(basePath || "/", (req, _res, next) => { req.cfg = DEFAULT_CFG; next(); }, router);
 app.use((_req, res) => res.status(404).json({ error: "not found" }));
 app.use((error, _req, res, _next) => {
   console.error("Unhandled error:", error.message);

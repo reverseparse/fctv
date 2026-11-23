@@ -18,8 +18,6 @@ const SPORTS = [
   ["fighting", 13], ["cycling", 14], ["handball", 15], ["other", 19]
 ];
 
-let catalogCache = { expiresAt: 0, matches: null };
-let catalogInFlight = null;
 const detailCache = new Map();
 const detailInFlight = new Map();
 
@@ -29,11 +27,11 @@ function textMapEntry(field) {
   return [String(asNumber(first(entry, 1))), asString(first(entry, 2)).trim()];
 }
 
-function localizedMapName(containerField, mapFieldNumber = 3) {
+function localizedMapName(containerField, mapFieldNumber = 3, lang = LANGUAGE) {
   if (!containerField || containerField.wire !== 2) return "";
   const container = asMessage(containerField);
   const entries = all(container, mapFieldNumber).map(textMapEntry).filter(([, value]) => value);
-  return entries.find(([language]) => language === String(LANGUAGE))?.[1]
+  return entries.find(([language]) => language === String(lang))?.[1]
     || entries.find(([language]) => language === "8")?.[1]
     || entries.find(([, value]) => value)?.[1]
     || "";
@@ -56,8 +54,8 @@ function nestedText(field, depth = 0) {
   return candidates.find(value => value.length > 1) || candidates[0] || "";
 }
 
-function teamName(field) {
-  return localizedMapName(field, 3) || nestedText(field);
+function teamName(field, lang = LANGUAGE) {
+  return localizedMapName(field, 3, lang) || nestedText(field);
 }
 
 function matchName(field) {
@@ -67,8 +65,14 @@ function matchName(field) {
   return nestedText(field);
 }
 
-function leagueName(field) {
-  return localizedMapName(field, 3) || nestedText(field);
+function leagueName(field, lang = LANGUAGE) {
+  return localizedMapName(field, 3, lang) || nestedText(field);
+}
+
+// PBDataLeague.country (field 80) carries a localized name map like teams/leagues do.
+function countryName(leagueField, lang = LANGUAGE) {
+  if (!leagueField || leagueField.wire !== 2) return "";
+  try { return localizedMapName(first(asMessage(leagueField), 80), 3, lang); } catch { return ""; }
 }
 
 function logoOf(field) {
@@ -88,26 +92,26 @@ function logoOf(field) {
   } catch { return ""; }
 }
 
-function contenderInfo(field) {
+function contenderInfo(field, lang = LANGUAGE) {
   // PBDataContender: name=2 (string, whole event "A vs B"), team=10 (PBDataTeam), player=20 (PBDataPlayer).
   if (!field || field.wire !== 2) return { event: "", side: "" };
   const c = asMessage(field);
   const event = asString(first(c, 2)).trim();
   const team = first(c, 10);
   const player = first(c, 20);
-  const side = (team ? teamName(team) : "") || (player ? teamName(player) : "");
+  const side = (team ? teamName(team, lang) : "") || (player ? teamName(player, lang) : "");
   return { event, side, logo: logoOf(team) || logoOf(player) };
 }
 
-function decodeMatch(field) {
+function decodeMatch(field, lang = LANGUAGE) {
   const f = asMessage(field);
   const matchId = asId(first(f, 1));
   const sportType = asNumber(first(f, 2));
-  const contenders = all(f, 30).map(contenderInfo);
+  const contenders = all(f, 30).map(c => contenderInfo(c, lang));
   const sides = contenders.map(c => c.side).filter(Boolean);
   const contenderEvent = contenders.map(c => c.event).find(Boolean) || "";
-  const home = teamName(first(f, 20)) || sides[0] || "";
-  const away = teamName(first(f, 21)) || sides[1] || "";
+  const home = teamName(first(f, 20), lang) || sides[0] || "";
+  const away = teamName(first(f, 21), lang) || sides[1] || "";
   const explicitName = matchName(first(f, 19)) || contenderEvent;
   const title = [home, away].filter(Boolean).join(" - ") || explicitName || `Match ${matchId}`;
   const homeScoreField = first(f, 22);
@@ -119,7 +123,9 @@ function decodeMatch(field) {
   };
   return {
     matchId, sportType, title, home, away,
-    league: leagueName(first(f, 10)),
+    league: leagueName(first(f, 10), lang),
+    leagueId: asId(first(asMessage(first(f, 10)), 1)),
+    country: countryName(first(f, 10), lang),
     logos: contenders.map(c => c.logo).filter(Boolean),
     leagueLogo: logoOf(first(f, 10)),
     status: first(f, 4)?.wire === 0 ? asNumber(first(f, 4)) : null,
@@ -217,20 +223,20 @@ async function fetchProtobuf(url, label) {
   throw new Error(`${label}: HTTP 429 after retry`);
 }
 
-function buildMatchUrl(base, sportType, version) {
+function buildMatchUrl(base, sportType, version, lang = LANGUAGE) {
   // This mirrors MatchRepository.getLiveGame() in the APK:
   // md5("language=<n>&sportType=<n>&stream=true"), then prefix it with LIVE_CODE.
-  const querySignature = `language=${LANGUAGE}&sportType=${sportType}&stream=true`;
+  const querySignature = `language=${lang}&sportType=${sportType}&stream=true`;
   const digest = createHash("md5").update(querySignature, "utf8").digest("hex");
   const params = `${LIVE_CODE}${digest}`;
   const url = new URL(`/sfver${params}${version}/api/match/live`, base);
-  url.searchParams.set("language", String(LANGUAGE));
+  url.searchParams.set("language", String(lang));
   url.searchParams.set("sportType", String(sportType));
   url.searchParams.set("stream", "true");
   return url;
 }
 
-async function requestSport(sportName, sportType) {
+async function requestSport(sportName, sportType, lang = LANGUAGE) {
   const base = (await getDataApiBase()).replace(/\/+$/, "");
   const signatureUrl = new URL("/api/common/bs", `${base}/`);
   signatureUrl.searchParams.set("code", String(LIVE_CODE));
@@ -241,13 +247,13 @@ async function requestSport(sportName, sportType) {
   const signatureResponse = await fetchProtobuf(signatureUrl, `signature ${sportName}`);
   const signatureEnvelope = responseData(signatureResponse.bytes, `signature ${sportName}`);
   const version = signatureVersion(signatureEnvelope.payload);
-  const matchUrl = buildMatchUrl(base, sportType, version);
+  const matchUrl = buildMatchUrl(base, sportType, version, lang);
   const matchResponse = await fetchProtobuf(matchUrl, `match/live ${sportName}`);
   const matchEnvelope = responseData(matchResponse.bytes, `match/live ${sportName}`);
 
   const matchFields = all(matchEnvelope.payload, 1);
   const streamFields = all(matchEnvelope.payload, 2);
-  const matches = matchFields.map(decodeMatch).filter(match => match.matchId);
+  const matches = matchFields.map(f => decodeMatch(f, lang)).filter(match => match.matchId);
   const streams = streamFields.map(decodeStream).filter(stream => stream.matchId);
 
   const summarizeNameField = field => {
@@ -458,12 +464,12 @@ async function resolveDetailedStreams(results, { limit = Infinity } = {}) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function inspectQueries(queries) {
+async function inspectQueries(queries, lang = LANGUAGE) {
   const results = [];
   for (let index = 0; index < queries.length; index++) {
     const [name, type] = queries[index];
     try {
-      results.push(await requestSport(name, type));
+      results.push(await requestSport(name, type, lang));
     } catch (error) {
       results.push({ matches: [], streams: [], diagnostics: {
         sport: name,
@@ -514,32 +520,43 @@ export async function resolveMatchStreams(matchId, sportType) {
   return streams;
 }
 
-export function cachedMatch(matchId) {
-  return catalogCache.matches?.find(match => match.matchId === String(matchId)) || null;
+export const LANGUAGES = { it: 8, en: 0, es: 4, pt: 5, fr: 6, de: 7, ru: 9, pl: 16, ro: 17, nl: 21, tr: 24 };
+
+const catalogCaches = new Map(); // lang -> { expiresAt, matches }
+const catalogInFlight = new Map();
+
+export function cachedMatch(matchId, lang) {
+  const id = String(matchId);
+  const pools = lang !== undefined && catalogCaches.has(lang) ? [catalogCaches.get(lang)] : [...catalogCaches.values()];
+  for (const pool of pools) {
+    const found = pool.matches?.find(match => match.matchId === id);
+    if (found) return found;
+  }
+  return null;
 }
 
-export async function liveMatches({ force = false } = {}) {
-  if (!force && catalogCache.matches && catalogCache.expiresAt > Date.now()) return catalogCache.matches;
-  if (catalogInFlight) return catalogInFlight;
+export async function liveMatches({ force = false, lang = LANGUAGE } = {}) {
+  const cached = catalogCaches.get(lang);
+  if (!force && cached?.matches && cached.expiresAt > Date.now()) return cached.matches;
+  if (catalogInFlight.has(lang)) return catalogInFlight.get(lang);
 
-  catalogInFlight = (async () => {
-    const aggregate = await requestSport("all", 0).catch(error => {
-      console.error("FCTV77 aggregate catalog:", error.message);
+  const pending = (async () => {
+    const aggregate = await requestSport("all", 0, lang).catch(error => {
+      console.error("FCTV aggregate catalog:", error.message);
       return null;
     });
     let results = aggregate ? [aggregate] : [];
-    // The live list already flags matches with an active stream; streamIds are resolved lazily
-    // (resolveMatchStreams) when the user opens an event, so the catalog needs no per-match detail calls.
+    // Stream ids are resolved lazily when an event is opened (resolveMatchStreams).
     let matches = listStreamBacked(results);
     if (!matches.length) {
-      results = await inspectQueries(SPORTS);
+      results = await inspectQueries(SPORTS, lang);
       matches = listStreamBacked(results);
     }
-    console.info(`[FCTV77 catalog] ${matches.length} stream-backed matches`);
-
-    catalogCache = { matches, expiresAt: Date.now() + CACHE_MS };
+    console.info(`[FCTV catalog:${lang}] ${matches.length} stream-backed matches`);
+    catalogCaches.set(lang, { matches, expiresAt: Date.now() + CACHE_MS });
     return matches;
-  })().finally(() => { catalogInFlight = null; });
+  })().finally(() => catalogInFlight.delete(lang));
 
-  return catalogInFlight;
+  catalogInFlight.set(lang, pending);
+  return pending;
 }

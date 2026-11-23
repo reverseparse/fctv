@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FCTV</title>
+<style>
+  :root { --bg:#000; --fg:#f2f2f2; --mut:#7a7a7a; --line:#1f1f1f; --card:#0a0a0a; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif; }
+  a { color:inherit; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:18px 28px; border-bottom:1px solid var(--line); }
+  header b { letter-spacing:.2em; font-weight:600; }
+  header span { color:var(--mut); font-size:13px; font-family:ui-monospace, Menlo, monospace; }
+  main { max-width:1080px; margin:0 auto; padding:40px 28px 80px; display:grid; grid-template-columns:1.05fr 1fr; gap:40px; align-items:start; }
+  @media (max-width:860px) { main { grid-template-columns:1fr; } }
+  h1 { font-size:34px; line-height:1.15; margin:0 0 12px; font-weight:600; letter-spacing:-.02em; }
+  p.lead { color:var(--mut); margin:0 0 24px; max-width:46ch; }
+  #ascii { width:100%; height:auto; display:block; border:1px solid var(--line); background:#000; cursor:crosshair; }
+  .step { border:1px solid var(--line); background:var(--card); border-radius:10px; padding:18px 20px; margin-bottom:14px; }
+  .step h2 { margin:0 0 4px; font-size:15px; font-weight:600; }
+  .step p { margin:0 0 12px; color:var(--mut); font-size:13px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  input, select { width:100%; background:#000; color:var(--fg); border:1px solid #2a2a2a; border-radius:8px; padding:10px 12px; font:inherit; outline:none; }
+  input:focus, select:focus { border-color:#6a6a6a; }
+  .murl { display:block; font:12px/1.5 ui-monospace, Menlo, monospace; background:#000; border:1px solid #2a2a2a; border-radius:8px; padding:12px; word-break:break-all; color:#cfcfcf; min-height:46px; }
+  .row { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  .btn { flex:1; text-align:center; padding:11px 14px; border-radius:8px; border:1px solid var(--fg); background:var(--fg); color:#000; font:inherit; font-weight:600; cursor:pointer; text-decoration:none; }
+  .btn.sec { background:transparent; color:var(--fg); border-color:#3a3a3a; }
+  .btn:hover { opacity:.88; }
+  .note { color:var(--mut); font-size:12px; margin-top:12px; }
+  .warn { color:#bdbdbd; font-size:12px; margin-top:8px; }
+</style>
+</head>
+<body>
+<header><b>FCTV</b><span id="ver">live sport</span></header>
+<main>
+  <section>
+    <h1>Sport live in Stremio,<br>ordinato per lega.</h1>
+    <p class="lead">Le partite di Serie A nella categoria Serie A, quelle di Premier League nella Premier League, e così via. Imposta lingua e proxy, copia il manifest.</p>
+    <canvas id="ascii" aria-label="Onda ASCII interattiva"></canvas>
+  </section>
+  <section>
+    <article class="step">
+      <h2>Lingua</h2>
+      <p>Cambia i nomi di squadre e leghe (non i flussi video).</p>
+      <select id="lang">
+        <option value="it">Italiano</option><option value="en">English</option><option value="es">Español</option>
+        <option value="pt">Português</option><option value="fr">Français</option><option value="de">Deutsch</option>
+        <option value="nl">Nederlands</option><option value="pl">Polski</option><option value="ro">Română</option>
+        <option value="ru">Русский</option><option value="tr">Türkçe</option>
+      </select>
+    </article>
+    <article class="step">
+      <h2>EasyProxy <span style="color:var(--mut);font-weight:400">opzionale</span></h2>
+      <p>Se vuoi che il video passi dal tuo EasyProxy invece che dall'addon.</p>
+      <label for="purl">URL EasyProxy</label>
+      <input id="purl" type="url" placeholder="https://easyproxy.example.com" autocomplete="off" spellcheck="false">
+      <label for="ppw">Password</label>
+      <input id="ppw" type="password" placeholder="Vuota se il proxy non ne ha" autocomplete="off">
+      <div class="warn" id="pwarn"></div>
+    </article>
+    <article class="step">
+      <h2>Manifest</h2>
+      <code class="murl" id="murl"></code>
+      <div class="row">
+        <a class="btn" id="install" href="#">Installa in Stremio</a>
+        <button class="btn sec" id="copy" type="button">Copia URL</button>
+      </div>
+      <p class="note">Se il pulsante non apre l'app, copia l'URL e incollalo nella ricerca add-on di Stremio. La password del proxy resta dentro l'URL: non condividerlo.</p>
+    </article>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const b64url = s => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const base = location.origin + location.pathname.replace(/\/(configure)?\/?$/, '').replace(/\/c\/[^/]+$/, '');
+  const saved = (() => { try { return JSON.parse(localStorage.getItem('fctv-cfg') || '{}'); } catch { return {}; } })();
+  $('lang').value = saved.l || 'it'; $('purl').value = saved.p || ''; $('ppw').value = saved.w || '';
+
+  function manifest() {
+    let p = $('purl').value.trim().replace(/\/+$/, '');
+    if (p && !/^https?:\/\//i.test(p)) p = 'https://' + p;
+    const cfg = { l: $('lang').value };
+    if (p) { cfg.p = p; if ($('ppw').value) cfg.w = $('ppw').value; }
+    try { localStorage.setItem('fctv-cfg', JSON.stringify({ l: cfg.l, p: cfg.p || '', w: cfg.w || '' })); } catch {}
+    $('pwarn').textContent = p && location.protocol === 'https:' && p.startsWith('http:') ? 'Il proxy è http: Stremio potrebbe bloccarlo da pagine https.' : '';
+    return cfg.l === 'it' && !cfg.p ? `${base}/manifest.json` : `${base}/c/${b64url(JSON.stringify(cfg))}/manifest.json`;
+  }
+  let needProxy = false;
+  function update() {
+    const m = manifest();
+    const p = $('purl').value.trim();
+    const blocked = needProxy && !/^(https?:\/\/)?[^\s/.]+\.[^\s/]+/i.test(p);
+    $('murl').textContent = blocked ? 'Inserisci l\'URL del tuo EasyProxy per generare il manifest.' : m;
+    $('install').href = blocked ? '#' : 'stremio://' + m.replace(/^https?:\/\//i, '');
+    $('install').style.opacity = $('copy').style.opacity = blocked ? '.4' : '';
+    $('install').onclick = blocked ? e => e.preventDefault() : null;
+    $('copy').disabled = blocked;
+    $('copy').dataset.blocked = blocked ? '1' : '';
+  }
+  ['lang', 'purl', 'ppw'].forEach(id => $(id).addEventListener('input', update));
+  $('copy').onclick = async () => {
+    const prev = $('copy').textContent;
+    try { await navigator.clipboard.writeText($('murl').textContent); $('copy').textContent = 'Copiato'; }
+    catch { const r = document.createRange(); r.selectNodeContents($('murl')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); $('copy').textContent = 'Seleziona e copia'; }
+    setTimeout(() => { $('copy').textContent = prev; }, 1400);
+  };
+  update();
+  fetch(base + '/api/public-config').then(r => r.json()).then(c => {
+    if (c.proxyRequired && !c.serverProxy) {
+      needProxy = true;
+      $('purl').required = true;
+      document.querySelector('#purl').closest('.step').querySelector('h2').innerHTML = 'EasyProxy <span style="color:var(--fg);font-weight:400">obbligatorio</span>';
+      update();
+    }
+  }).catch(() => {});
+  fetch(base + '/manifest.json').then(r => r.json()).then(j => { if (j.version) $('ver').textContent = 'v' + j.version; }).catch(() => {});
+
+  // ---- ASCII logo: shapes light up, mouse sends ripples through it ----
+  const LW = 70, LH = 45, LOGO = "000000111111111111111111111111111111111111111111111111111111111000000000001111111111111111111111111111111111111111111111111111111111111100000011111111111111111111111111111111111111111111111111111111111111111100011111111111111111111111111111111111111111111111111111111111111111111001111111111111111111111111111111111222211111111111111111111111111111101111111111111111111111111111111122222222211111111111111111111111111111111111111111111111111111111112222222222222221111111111111111111111111111111111111111111111111111122222222222222222222111111111111111111111111111111111111111111111112222222222222222222222222111111111111111111111111111111111111111111122222222222222222222222222222211111111111111111111111111111111111112222222222222222222222222222222222221111111111111111111111111111111222222222222222222222222222222222222222221111111111111111111111111112222222222222222222222222222222222222222222222111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111222111111111111111111111111111111111111111111111111111111111111111111112222221111111111111111111111111111111111111111111211111111111111111111122222222211111111111111111111111111111111111111121111111111111111111111222222222222111111111111111111111111111111111122111111111111111111111122222222222221111111122222222222222222222222222211111111111111111111112222222222221111111122222222222222222222222222221111111111111111111111222222222222111111122222222222222222222222222222111111111111111111111122222222222111111112222222222222222222222222222211111111111111111111112222222222211111112222221111111111111111111122221111111111111111111111222222222221111111222222111111111111111111112222111111111111111111111122222222221111111122222111111111111111111111222211111111111111111111112222222222111111122222211111111111111111111222221111111111111111111111222222222111111112222222222222222222222222222222111111111111111111111122222222211111112222222222222222222222222222222211111111111111111111112222222211111111222222222222222222222222222222221111111111111111111111222222221111111222222222222222222222222222222222111111111111111111111122222221111111122222222222222222222222222222222211111111111111111111111222222111111122222222222222222222222222222222211111111111111111111111111222111111112222222222222222222222222222222211111111111111111111111111111111111112222222222222222222222222222221111111111111111111111111111111111111111222222222222222222222222222111111111111111111111111111111111111111111222222222222222222222222221111111111111111111111111111111111111111111122222222222222222222222111111111111111111111111111111111111111111111112211222222222222222211111111111111111111111111111111111111111111111112111111222222222222111111111111111111111111111111111111111111111111111111111111122222211111111111111111111111111111101111111111111111111111111111111111111111111111111111111111111111111100111111111111111111111111111111111111111111111111111111111111111111110001111111111111111111111111111111111111111111111111111111111111111110000001111111111111111111111111111111111111111111111111111111111111100000000001111111111111111111111111111111111111111111111111111111111000000";
+  const cv = $('ascii'), ctx = cv.getContext('2d');
+  const RAMP = ' .:-=+*#%@';
+  let CW = 9, CH = 14, ripples = [], mx = -1, my = -1;
+  const GRAYS = Array.from({ length: 25 }, (_, n) => { const g = 60 + Math.floor((n / 24) * 195); return `rgb(${g},${g},${g})`; });
+  function resize() {
+    const w = cv.parentElement.getBoundingClientRect().width, d = devicePixelRatio || 1;
+    CW = w / LW; CH = CW * 14 / 9;
+    const h = CH * LH;
+    cv.style.height = h + 'px'; cv.width = w * d; cv.height = h * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  addEventListener('resize', resize); resize();
+  cv.addEventListener('mousemove', e => {
+    const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    if (mx < 0) { mx = x; my = y; }
+    else if (Math.hypot(x - mx, y - my) > 28) { ripples.push({ x, y, t: performance.now() }); mx = x; my = y; }
+    if (ripples.length > 12) ripples.shift();
+  });
+  cv.addEventListener('mouseleave', () => { mx = my = -1; });
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function frame(now) {
+    const w = cv.width / (devicePixelRatio || 1), h = CH * LH;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+    ctx.font = `${CH * 0.86}px ui-monospace, Menlo, monospace`; ctx.textBaseline = 'top';
+    const t = reduce ? 0 : now / 1000;
+    ripples = ripples.filter(r => now - r.t < 2400);
+    // Per-ripple values depend only on age: compute once per frame, not once per cell.
+    const live = ripples.map(r => { const age = (now - r.t) / 1000; return { x: r.x, y: r.y, front: age * 170, amp: Math.exp(-age * 1.3) * 0.55 }; });
+    let lastG = -1;
+    for (let j = 0; j < LH; j++) {
+      for (let i = 0; i < LW; i++) {
+        const c = LOGO[j * LW + i];
+        if (c === '0') continue;
+        const x = i * CW, y = j * CH;
+        let v = c === '2' ? 0.82 : 0.2;
+        v += Math.sin(i * 0.3 + j * 0.2 + t * 1.2) * 0.05;
+        for (let k = 0; k < live.length; k++) {
+          const r = live[k], dx = x - r.x, dy = y - r.y;
+          if (dx > 330 || dx < -330 || dy > 330 || dy < -330) continue;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > 330) continue;
+          v += Math.sin((dist - r.front) / 13) * r.amp * Math.exp(-dist / 150);
+        }
+        v = Math.max(0, Math.min(0.999, v));
+        const idx = Math.floor(v * RAMP.length);
+        if (idx === 0) continue;
+        const gi = Math.floor(v * 24);
+        if (gi !== lastG) { ctx.fillStyle = GRAYS[gi]; lastG = gi; }
+        ctx.fillText(RAMP[idx], x, y);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
