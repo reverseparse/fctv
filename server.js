@@ -9,7 +9,7 @@ import { streamDetail } from "./src/stream.js";
 import { liveMatches, inspectLiveCatalog, resolveMatchStreams, cachedMatch, LANGUAGES } from "./src/live.js";
 import { getDomainStatus, startDomainRefresh } from "./src/domains.js";
 
-const VERSION = "0.9.12";
+const VERSION = "1.0.0";
 const IS_PROD = process.env.NODE_ENV === "production";
 const PORT = Number(process.env.PORT || 7070);
 const HOST = process.env.HOST || "0.0.0.0";

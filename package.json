@@ -1,6 +1,6 @@
 {
   "name": "fctv77-stremio-addon",
-  "version": "0.9.12",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Stremio addon with Firebase-driven FCTV77 domain discovery, live catalog and stream resolver",

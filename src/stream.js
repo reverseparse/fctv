@@ -117,7 +117,7 @@ async function getPlayerReferer() {
   try {
     const base = await getDataApiBase();
     const response = await fetch(new URL("/api/common/params", base), {
-      headers: { "user-agent": "FCTV77-Stremio/0.9.12" },
+      headers: { "user-agent": "FCTV-Stremio/1.0.0" },
       signal: AbortSignal.timeout(8000)
     });
     if (response.ok) {
@@ -155,7 +155,7 @@ export async function streamDetail(q, { diagnostics = false } = {}) {
         signal: controller.signal,
         headers: {
           accept: "application/octet-stream, application/x-protobuf, */*",
-          "user-agent": "FCTV77-Stremio/0.9.10"
+          "user-agent": "FCTV-Stremio/1.0.0"
         }
       });
       bytes = new Uint8Array(await response.arrayBuffer());
