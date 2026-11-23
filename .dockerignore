@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.git
+.github
+.env
+.env.*
+!.env.example
+*.apk
+*.har
+Dockerfile
+.dockerignore
+README.md

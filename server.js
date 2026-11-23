@@ -9,7 +9,7 @@ import { streamDetail } from "./src/stream.js";
 import { liveMatches, inspectLiveCatalog, resolveMatchStreams, cachedMatch, LANGUAGES } from "./src/live.js";
 import { getDomainStatus, startDomainRefresh } from "./src/domains.js";
 
-const VERSION = "1.0.0";
+const VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const IS_PROD = process.env.NODE_ENV === "production";
 const PORT = Number(process.env.PORT || 7070);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -85,7 +85,7 @@ function parseCfg(raw) {
   } catch { return DEFAULT_CFG; }
 }
 
-const LANDING = readFileSync(new URL("./public/index.html", import.meta.url), "utf8");
+const LANDING = readFileSync(new URL("./public/index.html", import.meta.url), "utf8").replaceAll("__VERSION__", VERSION);
 
 function hmac(data) {
   return createHmac("sha256", HLS_SECRET).update(data).digest("base64url");
